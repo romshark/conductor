@@ -32,12 +32,9 @@ var systemSQL string
 //go:embed db/dbpgx/permissions.sql
 var permissionsSQL string
 
-var dbContainer testdb.Container
-
 func TestMain(m *testing.M) {
-	dbContainer.MustStart(context.Background())
 	// Roles must be created globally before systemSQL is executed.
-	dbContainer.MustExec(rolesSQL)
+	testdb.MustExecGlobal(rolesSQL)
 	os.Exit(m.Run())
 }
 
@@ -176,7 +173,7 @@ func setup(t *testing.T) (
 	log *slog.Logger, db *dbpgx.DB, ec *conductor.EventCodec,
 ) {
 	log = slog.Default()
-	db, _ = dbContainer.NewDBPGX(t, log)
+	db, _ = testdb.NewDBPGX(t, log)
 	migrateDB(t, db)
 	ec = NewTestCodec(t)
 	conductor.MustRegisterEventTypeIn[*EventTest](ec, "event-test")

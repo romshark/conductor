@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:17
+    container_name: test_pg17
+    environment:
+      POSTGRES_USER: testdb
+      POSTGRES_PASSWORD: testdb
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: [ "CMD", "pg_isready", "-U", "testdb" ]
+      interval: 1s
+      timeout: 5s
+      retries: 10

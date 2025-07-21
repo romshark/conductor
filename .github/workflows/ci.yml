@@ -5,6 +5,21 @@ on: [push, pull_request]
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: testdb
+          POSTGRES_PASSWORD: testdb
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U testdb"
+          --health-interval=1s
+          --health-timeout=5s
+          --health-retries=10
+
     steps:
       - name: Install Go 1.24.5
         uses: actions/setup-go@v5
@@ -25,7 +40,7 @@ jobs:
         run: make fmtcheck
 
       - name: Run tests with coverage
-        run: go test -covermode=atomic -coverpkg=./... -coverprofile=coverage.out ./...
+        run: go test -race -covermode=atomic -coverpkg=./... -coverprofile=coverage.out ./...
 
       - name: Upload coverage to Coveralls
         uses: coverallsapp/github-action@v2.3.6

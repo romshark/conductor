@@ -10,95 +10,47 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/stretchr/testify/require"
 
 	"github.com/romshark/conductor/db/dbpgx"
 	"github.com/romshark/conductor/internal/backoff"
-	"github.com/stretchr/testify/require"
-	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-type Container struct {
-	container testcontainers.Container
-	host      string
-	port      string
-	adminDSN  string
+const (
+	host     = "localhost"
+	port     = "5432"
+	user     = "testdb"
+	password = "testdb"
+	adminDB  = "postgres"
+)
+
+func AdminDSN() string {
+	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable",
+		user, password, host, port, adminDB)
 }
 
-func (c *Container) MustExec(sql string, arguments ...any) {
-	ctx := context.Background()
-	p, err := pgxpool.New(ctx, c.adminDSN)
+// MustExecGlobal executes sql in the admin database.
+func MustExecGlobal(sql string, args ...any) {
+	adminPool, err := pgxpool.New(context.Background(), AdminDSN())
 	if err != nil {
 		panic(err)
 	}
-	defer p.Close()
-	_, err = p.Exec(ctx, sql, arguments...)
+	defer adminPool.Close()
+	_, err = adminPool.Exec(context.Background(), sql, args...)
 	if err != nil {
 		panic(err)
 	}
 }
 
-func (c *Container) MustStart(ctx context.Context) {
-	if c.container != nil {
-		panic("container already started")
-	}
-
-	req := testcontainers.ContainerRequest{
-		Image: "postgres:17",
-		Env: map[string]string{
-			"POSTGRES_USER":     "testdb",
-			"POSTGRES_PASSWORD": "testdb",
-			"POSTGRES_DB":       "testdb",
-		},
-		ExposedPorts: []string{"5432/tcp"},
-		WaitingFor:   wait.ForListeningPort("5432/tcp").WithStartupTimeout(60 * time.Second),
-	}
-
-	cont, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: req,
-		Started:          true,
-	})
-	if err != nil {
-		panic(fmt.Errorf("starting container: %w", err))
-	}
-
-	host, err := cont.Host(ctx)
-	if err != nil {
-		panic(fmt.Errorf("container host: %w", err))
-	}
-	port, err := cont.MappedPort(ctx, "5432/tcp")
-	if err != nil {
-		panic(fmt.Errorf("container port: %w", err))
-	}
-
-	c.container = cont
-	c.host = host
-	c.port = port.Port()
-	c.adminDSN = fmt.Sprintf("postgres://testdb:testdb@%s:%s/postgres?sslmode=disable",
-		c.host, c.port)
-}
-
-func (c *Container) Terminate() {
-	if c.container == nil {
-		return
-	}
-	_ = c.container.Terminate(context.Background())
-	c.container = nil
-}
-
-// NewDBPGX creates a new dbpgx based database within the container for test t.
-func (c *Container) NewDBPGX(t testing.TB, log *slog.Logger) (*dbpgx.DB, string) {
+// NewDBPGX creates a new dbpgx-based test database for the given test.
+func NewDBPGX(t testing.TB, log *slog.Logger) (db *dbpgx.DB, dsn string) {
 	t.Helper()
 	ctx := t.Context()
 
-	if c.container == nil {
-		t.Fatal("container not started")
-	}
-
-	// Derive name from test name.
+	// Derive a unique test DB name from the test name
 	dbName := "test_" + strings.ReplaceAll(t.Name(), "/", "_")
 
-	adminPool, err := pgxpool.New(ctx, c.adminDSN)
+	adminPool, err := pgxpool.New(ctx, AdminDSN())
 	require.NoError(t, err)
 	defer adminPool.Close()
 
@@ -108,15 +60,15 @@ func (c *Container) NewDBPGX(t testing.TB, log *slog.Logger) (*dbpgx.DB, string)
 	_, err = adminPool.Exec(ctx, `CREATE DATABASE `+dbNameSanitized)
 	require.NoError(t, err)
 
-	dsn := fmt.Sprintf("postgres://testdb:testdb@%s:%s/%s?sslmode=disable",
-		c.host, c.port, dbName)
+	testDSN := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable",
+		user, password, host, port, dbName)
 
 	bo, err := backoff.New(100*time.Millisecond, 300*time.Millisecond, 2.0, 0, nil)
 	require.NoError(t, err)
 
-	db, err := dbpgx.Open(ctx, log, dsn, 0, bo)
+	db, err = dbpgx.Open(ctx, log, testDSN, 0, bo)
 	require.NoError(t, err)
 
 	t.Cleanup(db.Close)
-	return db, dsn
+	return db, testDSN
 }

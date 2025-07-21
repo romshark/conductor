@@ -1,3 +1,8 @@
+.PHONY: all vulncheck fmtcheck test
+
+lint:
+	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest run ./...
+
 vulncheck:
 	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
@@ -9,5 +14,7 @@ fmtcheck:
 		exit 1; \
 	fi
 
-test: fmtcheck
-	go test -coverpkg=./... -v .
+test: fmtcheck lint
+	docker-compose up -d
+	go test -race -coverpkg=./... -v ./...
+	docker-compose down -v
