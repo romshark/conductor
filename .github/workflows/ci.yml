@@ -1,0 +1,41 @@
+on: [push, pull_request]
+name: CI
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      # Install
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.2"
+          check-latest: true
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+      - name: Install Templ
+        run: go install github.com/a-h/templ/cmd/templ@v0.3.609
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Generate
+      - name: Generate files
+        run: ./buildall.sh
+
+      # Lint
+      - name: Run lint:ts
+        run: bun run lint:ts
+      - name: Run go vet
+        continue-on-error: true
+        run: go vet ./...
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: latest
+
+      # Test
+      - name: Test and calculate coverage
+        run: go test -v -covermode=count -coverprofile=coverage.out ./...
+
+      # Try compile
+      - name: Compile
+        run: go build -o /dev/null ./cmd/server
