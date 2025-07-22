@@ -172,7 +172,7 @@ func (r *EventCodec) DecodeJSON(name string, payload []byte) (Event, error) {
 //	conductor.MustRegisterEventType[*SomethingHappened]("something-happened")
 //
 // By default, events are registered globally.
-// It is adviced to register the type during package init.
+// It's advised to register the type during package init.
 type EventMetadata struct {
 	name        string
 	t           time.Time

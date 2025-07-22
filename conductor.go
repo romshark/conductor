@@ -67,7 +67,7 @@ type StatefulProcessor interface {
 	// projection version of the processor.
 	// The returned commit function must reliably commit the applied changes
 	// (two-phase commit).
-	// If commit is never called the changes must never be commited.
+	// If commit is never called the changes must never be committed.
 	// No changes to the state of the processor should be visible until commit is called.
 	Apply(
 		ctx context.Context, assumedVersion int64, event Event,
@@ -97,7 +97,7 @@ type Reactor interface {
 	// If React returns an error its version is not updated and React is called
 	// again, until it returns nil. React is always called by a new goroutine.
 	// The conductor can't guarantee exactly-once delivery, instead it guarantees
-	// at-least-once, meaning that if React managed to execute successfuly and
+	// at-least-once, meaning that if React managed to execute successfully and
 	// returned nil but the system crashed before it could update the reactor version
 	// then React will be called at least twice or more times for this version.
 	React(ctx context.Context, version int64, e Event, tx db.TxReadOnly) error

@@ -893,7 +893,7 @@ func TestSyncAppend(t *testing.T) {
 			Once().
 			NotBefore(ps1)
 
-		// Final attempt that will suceed.
+		// Final attempt that will succeed.
 		ps.requireCallProcess(&EventTest{Foo: "third", Bar: 3}).
 			Return(error(nil)).
 			Once().
