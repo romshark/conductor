@@ -43,10 +43,12 @@ There are 3 types of middleware modules that can plug into a Conductor instance:
   - Can enforce invariants and veto appends.
   - Manages projections stored outside of the event log database
     (including in-memory projections) that are eventually consistent in a cluster setup.
+  - Is responsible for keeping track of its projection version on its own.
   - Uses [two-phase commits](https://en.wikipedia.org/wiki/Two-phase_commit_protocol)
     to prevent partial or dangling writes.
 - **Reactor**: reacts to appended events with an *at-least-once* delivery guarantee.
   - ⚠️ May require external coordination in a cluster setup.
+  - Projection version is automatically tracked by Conductor.
 
 | module             | setup     | consistency |
 | :----------------- | :-------- | :---------- |
