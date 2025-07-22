@@ -105,7 +105,6 @@ type Reactor interface {
 
 type reactor struct {
 	lock    sync.Mutex
-	version int64
 	backoff *backoff.Atomic
 	Reactor
 }
@@ -143,6 +142,8 @@ type Conductor struct {
 	eventCodec          *EventCodec
 	listenLock          sync.Mutex
 	syncLock            sync.Mutex
+	versionLock         sync.RWMutex
+	version             int64
 	processorsStateless []*statelessProcessors
 	processorsStateful  []*statefulProcessor
 	reactorsByID        map[int32]*reactor
@@ -224,7 +225,6 @@ func Make(
 				return fmt.Errorf("initializing reactor projection (%d) version: %w",
 					id, err)
 			}
-			o.reactorsByID[id].version = v
 			log.Info("initialized reactor projection version",
 				slog.Int("reactor.id", int(id)),
 				slog.Int64("version", v))
@@ -239,23 +239,53 @@ func Make(
 }
 
 func (o *Conductor) syncStatefulProcessors(
-	ctx context.Context, log *slog.Logger, targetVersion int64, concurrencyLimit int,
+	ctx, ctxGraceful context.Context, log *slog.Logger, concurrencyLimit int,
 ) error {
 	var g errgroup.Group
 	g.SetLimit(concurrencyLimit)
 	for i := range o.processorsStateful {
 		g.Go(func() error {
-			return o.syncStatefulProcessor(ctx, log, i, targetVersion)
+			return o.syncStatefulProcessor(ctx, ctxGraceful, log, i)
 		})
 	}
 	return g.Wait()
 }
 
+func (o *Conductor) getCachedVersion() int64 {
+	o.versionLock.RLock()
+	defer o.versionLock.RUnlock()
+	return o.version
+}
+
+func (o *Conductor) updateCachedVersion(
+	ctx context.Context, tx db.TxReadOnly,
+) (systemVersion int64, err error) {
+	o.versionLock.Lock()
+	defer o.versionLock.Unlock()
+	if tx == nil {
+		err = o.db.TxReadOnly(ctx, func(ctx context.Context, tx db.TxReadOnly) error {
+			systemVersion, err = tx.ReadSystemVersion(ctx)
+			return err
+		})
+	} else {
+		systemVersion, err = tx.ReadSystemVersion(ctx)
+	}
+	if err != nil {
+		return 0, err
+	}
+	o.version = systemVersion
+	return systemVersion, nil
+}
+
 func (o *Conductor) syncStatefulProcessor(
-	ctx context.Context, log *slog.Logger, index int, targetVersion int64,
+	ctx, ctxGraceful context.Context, log *slog.Logger, index int,
 ) error {
 	p := o.processorsStateful[index]
 	for {
+		if err := ctxGraceful.Err(); err != nil {
+			return err
+		}
+
 		if d := p.backoff.Duration(); d > 0 {
 			log.Info("backing off for stateful processor retry",
 				slog.Int("processor", index),
@@ -271,7 +301,7 @@ func (o *Conductor) syncStatefulProcessor(
 				err)
 		}
 
-		if v >= targetVersion {
+		if v >= o.getCachedVersion() {
 			p.backoff.Reset()
 			return nil // Projection is up to date.
 		}
@@ -296,10 +326,13 @@ func (o *Conductor) syncStatefulProcessor(
 }
 
 func (o *Conductor) syncReactor(
-	ctx context.Context, log *slog.Logger, r *reactor,
+	ctx, ctxGraceful context.Context, log *slog.Logger, r *reactor,
 ) error {
 	for {
-		_, _, _, err := o.syncReactorToNextVersion(ctx, log, r)
+		if err := ctxGraceful.Err(); err != nil {
+			return err
+		}
+		_, _, err := o.syncReactorToNextVersion(ctx, log, r)
 		if err != nil {
 			if errors.Is(err, ErrNoNextVersion) {
 				break
@@ -344,7 +377,15 @@ func (t *TickingPoller) Stop()               { t.ticker.Stop() }
 func (t *TickingPoller) Reset()              { t.ticker.Reset(t.interval) }
 func (t *TickingPoller) C() <-chan time.Time { return t.ticker.C }
 
-// Listen runs the conductor dispatcher that listens for new events and synchronizes.
+// Listen runs the conductor dispatcher that listens for new events and triggers
+// synchronization.
+//
+// Canceling ctx will stop both the listener and any potentially ongoing
+// synchronization, potentially causing I/O errors to be logged because the underlying
+// database transactions are canceled before Sync finishes. Canceling ctxListen
+// will gracefuly wait for any ongoing synchronizations to finish and then exits the
+// listener loop.
+//
 // Listen will periodically poll the database for new events if pollingInterval > 0,
 // otherwise polling is disabled. Parameter queueBufferLen specifies the listener queue
 // buffer size. If the listener goroutine can't keep up with the notifications then those
@@ -355,8 +396,11 @@ func (t *TickingPoller) C() <-chan time.Time { return t.ticker.C }
 // poller == nil then ErrNothingToListenTo is returned.
 // If poller satisfies TimedPoller then poller.Reset is called to prevent the timed
 // poller from triggering prematurely.
+//
+// onListening is called once the listener is listening.
 func (o *Conductor) Listen(
-	ctx context.Context, log *slog.Logger, poller Poller, queueBufferLen int,
+	ctx, ctxGraceful context.Context, log *slog.Logger,
+	poller Poller, queueBufferLen int, onListening func(),
 ) error {
 	if !o.listenLock.TryLock() {
 		return ErrAlreadyListening
@@ -364,23 +408,25 @@ func (o *Conductor) Listen(
 	defer o.listenLock.Unlock()
 
 	var eventInserted chan int64
+	eventInsertedErr := make(chan error, 1)
 	if listener, ok := o.db.(db.Listener); ok {
 		eventInserted = make(chan int64, queueBufferLen)
 		go func() {
-			err := listener.ListenEventInserted(ctx, func(version int64) error {
-				// In worst case wait for the listener goroutine to read eventInserted.
-				select {
-				case eventInserted <- version:
-				default:
-					log.Warn("listener buffer overflow, "+
-						"event insertion notifications may be dropped",
-						slog.Int("len", len(eventInserted)))
-				}
-				return nil
-			})
-			if err != nil {
-				log.Error("listening for event_inserted notifications",
-					slog.Any("err", err))
+			err := listener.ListenEventInserted(ctxGraceful,
+				onListening,
+				func(version int64) error {
+					select {
+					case eventInserted <- version:
+					default:
+						log.Warn("listener buffer overflow, "+
+							"event insertion notifications may be dropped",
+							slog.Int("len", len(eventInserted)))
+					}
+					return nil
+				})
+			if err != nil && !errors.Is(err, context.Canceled) {
+				close(eventInserted)
+				eventInsertedErr <- err
 			}
 		}()
 	} else if poller == nil {
@@ -400,15 +446,18 @@ func (o *Conductor) Listen(
 
 	for {
 		select {
-		case <-ctx.Done(): // Stop dispatcher.
+		case <-ctx.Done(): // Hard stop.
 			return ctx.Err()
+
+		case <-ctxGraceful.Done(): // Gracefuly stop dispatcher.
+			return ctxGraceful.Err()
 
 		case <-pollerC: // Poll database for new events.
 			if poller != nil {
 				poller.Stop()
 			}
 			log.Debug("dispatcher polling database")
-			if err := o.Sync(ctx, log); err != nil {
+			if err := o.Sync(ctx, ctxGraceful, log); err != nil {
 				if errors.Is(err, ErrSyncInProgress) {
 					continue
 				}
@@ -418,12 +467,20 @@ func (o *Conductor) Listen(
 				tp.Reset()
 			}
 
-		case version := <-eventInserted: // Database notified about event insertion.
+		case version, ok := <-eventInserted: // Database notified about event insertion.
+			if !ok {
+				select {
+				case err := <-eventInsertedErr:
+					return err
+				default:
+					return nil
+				}
+			}
 			if poller != nil {
 				poller.Stop()
 			}
-			log.Debug("update reactor", slog.Int64("version", version))
-			if err := o.Sync(ctx, log); err != nil {
+			log.Debug("resync after notification", slog.Int64("version", version))
+			if err := o.Sync(ctx, ctxGraceful, log); err != nil {
 				if errors.Is(err, ErrSyncInProgress) {
 					continue
 				}
@@ -440,29 +497,23 @@ func (o *Conductor) Listen(
 // reactors if necessary.
 // Returns ErrSyncInProgress if another sync is currently in flight.
 func (o *Conductor) Sync(
-	ctx context.Context, log *slog.Logger,
+	ctx, ctxGraceful context.Context, log *slog.Logger,
 ) error {
 	if !o.syncLock.TryLock() {
 		return ErrSyncInProgress
 	}
 	defer o.syncLock.Unlock()
 
-	var sysVersion int64
-	err := o.db.TxReadOnly(ctx, func(ctx context.Context, tx db.TxReadOnly) error {
-		var err error
-		sysVersion, err = o.querySystemVersion(ctx, tx)
+	if _, err := o.updateCachedVersion(ctx, nil); err != nil {
 		return err
-	})
-	if err != nil {
-		return fmt.Errorf("reading system version: %w", err)
 	}
 
-	err = o.syncStatefulProcessors(ctx, log, sysVersion, len(o.processorsStateful))
+	err := o.syncStatefulProcessors(ctx, ctxGraceful, log, len(o.processorsStateful))
 	if err != nil {
 		return fmt.Errorf("synchronizing stateful processors: %w", err)
 	}
 	for id, r := range o.reactorsByID {
-		if err := o.syncReactor(ctx, log, r); err != nil {
+		if err := o.syncReactor(ctx, ctxGraceful, log, r); err != nil {
 			return fmt.Errorf("synchronizing reactor %d: %w", id, err)
 		}
 	}
@@ -471,32 +522,27 @@ func (o *Conductor) Sync(
 
 func (o *Conductor) syncReactorToNextVersion(
 	ctx context.Context, log *slog.Logger, r *reactor,
-) (oldVersion, newVersion, sysVersion int64, err error) {
+) (oldVersion, newVersion int64, err error) {
 	id := r.ProjectionID()
 	if !r.lock.TryLock() {
-		return 0, 0, 0, ErrSyncInProgress
+		return 0, 0, ErrSyncInProgress
 	}
 	defer r.lock.Unlock()
 
 	if d := r.backoff.Duration(); d > 0 {
 		log.Info("backing off for retry", slog.String("backoff", d.String()))
 		if err := sleepContext(ctx, d); err != nil {
-			return oldVersion, newVersion, sysVersion, err
+			return oldVersion, newVersion, err
 		}
 	}
 
 	err = o.db.TxRW(ctx, func(ctx context.Context, tx db.TxRW) error {
-		sysVersion, err = o.querySystemVersion(ctx, tx)
-		if err != nil {
-			return err
-		}
-
 		oldVersion, err = queryProjectionVersion(ctx, tx, id)
 		if err != nil {
 			return err
 		}
 
-		if oldVersion >= sysVersion {
+		if oldVersion >= o.getCachedVersion() {
 			r.backoff.Reset()
 			return ErrNoNextVersion
 		}
@@ -521,10 +567,7 @@ func (o *Conductor) syncReactorToNextVersion(
 
 		return nil
 	})
-	if err == nil {
-		r.version = newVersion
-	}
-	return oldVersion, newVersion, sysVersion, err
+	return oldVersion, newVersion, err
 }
 
 func (o *Conductor) queryNextEvent(
@@ -578,27 +621,19 @@ func (o *Conductor) appendEvent(
 		}
 		return 0, fmt.Errorf("appending event: %w", err)
 	}
+	o.versionLock.Lock()
+	defer o.versionLock.Unlock()
+	o.version = newVersion
 	return newVersion, nil
 }
 
-// Version returns the current version of the system (version of latest event).
-func (o *Conductor) Version(
-	ctx context.Context,
-) (version int64, err error) {
-	errTx := o.db.TxReadOnly(ctx, func(ctx context.Context, tx db.TxReadOnly) error {
-		version, err = o.querySystemVersion(ctx, tx)
-		return err
-	})
-	return version, errTx
-}
+// VersionCached returns the cached version of the system
+// (version of latest event from the cache of this conductor instance).
+func (o *Conductor) VersionCached() (version int64) { return o.getCachedVersion() }
 
-func (o *Conductor) querySystemVersion(
-	ctx context.Context, tx db.Reader,
-) (version int64, err error) {
-	if version, err = tx.ReadSystemVersion(ctx); err != nil {
-		return 0, fmt.Errorf("querying system version: %w", err)
-	}
-	return version, err
+// Version returns the current version of the system (version of latest event).
+func (o *Conductor) Version(ctx context.Context) (version int64, err error) {
+	return o.updateCachedVersion(ctx, nil)
 }
 
 // SyncAppend is similar to Append but will automatically resync processors and retry
@@ -641,7 +676,7 @@ func (o *Conductor) Append(
 	commitFns := make([]func(context.Context) error, len(o.processorsStateful))
 	err = o.db.TxRW(ctx, func(ctx context.Context, tx db.TxRW) error {
 		for {
-			v, err := o.querySystemVersion(ctx, tx)
+			v, err := o.updateCachedVersion(ctx, tx)
 			if err != nil {
 				return err
 			}
@@ -660,12 +695,9 @@ func (o *Conductor) Append(
 						commit, err := p.Apply(ctx, v, e)
 						if errors.Is(err, ErrOutOfSync) {
 							// Resync projection.
-							v, err := o.querySystemVersion(ctx, tx)
-							if err != nil {
-								return err
-							}
-
-							err = o.syncStatefulProcessor(ctx, log, i, v)
+							err = o.syncStatefulProcessor(
+								ctx, context.Background(), log, i,
+							)
 							if err != nil {
 								return err
 							}
@@ -728,7 +760,7 @@ func queryProjectionVersion(
 ) (int64, error) {
 	version, err := tx.ReadProjectionVersion(ctx, id)
 	if err != nil {
-		return 0, fmt.Errorf("querying version: %w", err)
+		return 0, fmt.Errorf("querying projection version: %w", err)
 	}
 	return version, err
 }
@@ -785,13 +817,9 @@ func (i *EventsIterator) Next(ctx context.Context, n int) (
 		return func(yield func(int64, Event) bool) {}, nil
 	}
 	if i.v < 0 {
-		err = i.o.db.TxReadOnly(ctx, func(ctx context.Context, tx db.TxReadOnly) error {
-			var err error
-			i.v, err = i.o.querySystemVersion(ctx, tx)
-			return err
-		})
+		i.v, err = i.o.updateCachedVersion(ctx, nil)
 		if err != nil {
-			return nil, fmt.Errorf("querying system version: %w", err)
+			return nil, fmt.Errorf("updating cached version: %w", err)
 		}
 	}
 

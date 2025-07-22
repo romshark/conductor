@@ -50,11 +50,13 @@ type Writer interface {
 	) (version int64, err error)
 }
 
+// TxRW is a read-write transaction.
 type TxRW interface {
 	Reader
 	Writer
 }
 
+// TxReadOnly is a read-only transaction.
 type TxReadOnly interface {
 	Reader
 }
@@ -63,9 +65,12 @@ type TxReadOnly interface {
 // This interface may be implemented optionally. If not implemented
 // the Conductor will rely on polling.
 type Listener interface {
+	// ListenEventInserted calls onReady once it's listening and onEventInserted every
+	// time a new event was appended onto the event log.
 	ListenEventInserted(
 		ctx context.Context,
-		f func(version int64) error,
+		onReady func(),
+		onEventInserted func(version int64) error,
 	) error
 }
 

@@ -331,7 +331,9 @@ func (t *Tx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
 	return t.tx.QueryRow(ctx, sql, args...)
 }
 
-func (d DB) ListenEventInserted(ctx context.Context, fn func(version int64) error) error {
+func (d DB) ListenEventInserted(
+	ctx context.Context, onReady func(), onEventInserted func(version int64) error,
+) error {
 	// Dedicated connection from the pool.
 	conn, err := d.pool.Acquire(ctx)
 	if err != nil {
@@ -344,6 +346,8 @@ func (d DB) ListenEventInserted(ctx context.Context, fn func(version int64) erro
 		return fmt.Errorf("executing listen: %w", err)
 	}
 
+	onReady()
+
 	for {
 		n, err := conn.Conn().WaitForNotification(ctx)
 		if err != nil {
@@ -354,7 +358,7 @@ func (d DB) ListenEventInserted(ctx context.Context, fn func(version int64) erro
 			return fmt.Errorf("bad payload in notification on event_inserted: %q",
 				n.Payload)
 		}
-		if err := fn(version); err != nil {
+		if err := onEventInserted(version); err != nil {
 			return err
 		}
 	}

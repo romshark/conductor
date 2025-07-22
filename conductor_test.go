@@ -59,6 +59,43 @@ func (m *MockPoller) Stop()               {}
 
 var _ conductor.Poller = new(MockPoller)
 
+type FakeReactorRecord struct {
+	Version int64
+	Event   *EventTest
+}
+
+type FakeReactor struct {
+	projectionID int32
+	wg           sync.WaitGroup
+	lock         sync.Mutex
+	reactedTo    []FakeReactorRecord
+}
+
+var _ conductor.Reactor = new(FakeReactor)
+
+func (m *FakeReactor) Backoff() (
+	min, max time.Duration, factor, jitter float64,
+) {
+	min, max = 50*time.Millisecond, 500*time.Millisecond
+	factor, jitter = 2.0, 0
+	return
+}
+
+func (r *FakeReactor) React(
+	ctx context.Context, version int64, e conductor.Event, tx db.TxReadOnly,
+) error {
+	r.lock.Lock()
+	defer r.lock.Unlock()
+	r.reactedTo = append(r.reactedTo, FakeReactorRecord{
+		Version: version,
+		Event:   e.(*EventTest),
+	})
+	r.wg.Done()
+	return nil
+}
+
+func (r *FakeReactor) ProjectionID() int32 { return r.projectionID }
+
 type MockStatelessProcessor struct{ mock.Mock }
 
 func (m *MockStatelessProcessor) requireCallProcess(expect *EventTest) *mock.Call {
@@ -524,7 +561,7 @@ func TestSync(t *testing.T) {
 	requireVersion(t, 2, orch)
 	require.Zero(t, commitP.Load())
 
-	err = orch.Sync(ctx, log)
+	err = orch.Sync(ctx, context.Background(), log)
 	require.NoError(t, err)
 
 	require.Equal(t, int32(2), commitP.Load())
@@ -534,39 +571,11 @@ func TestSync(t *testing.T) {
 func TestReactorsNotification(t *testing.T) {
 	log, db, ec := setup(t)
 
-	reactorFirst := &MockReactor{projectionID: 1}
-	reactorSecond := &MockReactor{projectionID: 2}
-	defer reactorFirst.AssertExpectations(t)
-	defer reactorSecond.AssertExpectations(t)
+	reactorFirst := &FakeReactor{projectionID: 1}
+	reactorSecond := &FakeReactor{projectionID: 2}
 
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	{
-		first1 := reactorFirst.requireCallReact(
-			1, &EventTest{Foo: "foo", Bar: 42}).
-			Once().
-			Return(error(nil))
-
-		second1 := reactorSecond.requireCallReact(
-			1, &EventTest{Foo: "foo", Bar: 42}).
-			Once().
-			Return(error(nil))
-
-		reactorFirst.requireCallReact(
-			2, &EventTest{Foo: "foo2", Bar: 242}).
-			Return(error(nil)).
-			Once().
-			NotBefore(first1).
-			Run(func(mock.Arguments) { wg.Done() })
-
-		reactorSecond.requireCallReact(
-			2, &EventTest{Foo: "foo2", Bar: 242}).
-			Return(error(nil)).
-			Once().
-			NotBefore(second1).
-			Run(func(mock.Arguments) { wg.Done() })
-	}
+	reactorFirst.wg.Add(2)
+	reactorSecond.wg.Add(2)
 
 	ctx := t.Context()
 	orch, err := conductor.Make(
@@ -577,67 +586,62 @@ func TestReactorsNotification(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	go func() {
-		err := orch.Listen(ctx, log, nil /* Disable polling */, 1024)
-		if !errors.Is(err, context.Canceled) {
-			panic(fmt.Errorf("expected context canceled err, received: %w", err))
-		}
-	}()
-
 	requireVersion(t, 0, orch)
 
-	vPub, err := orch.Append(ctx, log, &EventTest{Foo: "foo", Bar: 42})
-	require.NoError(t, err)
-	require.Equal(t, int64(1), vPub)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 
-	requireVersion(t, 1, orch)
+	isListening := make(chan struct{}, 1)
+	onListening := func() { isListening <- struct{}{} }
 
-	vPub2, err := orch.Append(ctx, log, &EventTest{Foo: "foo2", Bar: 242})
-	require.NoError(t, err)
-	require.Equal(t, int64(2), vPub2)
+	go func() {
+		<-isListening // Wait for the listener to start listening.
+
+		_, err := orch.Append(ctx, log, &EventTest{Foo: "foo", Bar: 42})
+		if err != nil {
+			panic(err)
+		}
+
+		requireVersion(t, 1, orch)
+
+		_, err = orch.Append(ctx, log, &EventTest{Foo: "foo2", Bar: 242})
+		if err != nil {
+			panic(err)
+		}
+
+		reactorFirst.wg.Wait()
+		reactorSecond.wg.Wait()
+		cancel()
+	}()
+
+	err = orch.Listen(
+		context.Background(), ctx, log, nil /* Disable polling */, 1024, onListening)
+	require.ErrorIs(t, err, context.Canceled)
 
 	requireVersion(t, 2, orch)
 
-	wg.Wait()
+	require.Len(t, reactorFirst.reactedTo, 2)
+	require.Equal(t, int64(1), reactorFirst.reactedTo[0].Version)
+	require.Equal(t, int64(2), reactorFirst.reactedTo[1].Version)
+	require.Equal(t, "foo", reactorFirst.reactedTo[0].Event.Foo)
+	require.Equal(t, "foo2", reactorFirst.reactedTo[1].Event.Foo)
+
+	require.Len(t, reactorSecond.reactedTo, 2)
+	require.Equal(t, int64(1), reactorSecond.reactedTo[0].Version)
+	require.Equal(t, int64(2), reactorSecond.reactedTo[1].Version)
+	require.Equal(t, "foo", reactorSecond.reactedTo[0].Event.Foo)
+	require.Equal(t, "foo2", reactorSecond.reactedTo[1].Event.Foo)
 }
 
 // TestReactorsPolling tests database polling.
 func TestReactorsPolling(t *testing.T) {
 	log, db, ec := setup(t)
 
-	reactorFirst := &MockReactor{projectionID: 1}
-	reactorSecond := &MockReactor{projectionID: 2}
-	defer reactorFirst.AssertExpectations(t)
-	defer reactorSecond.AssertExpectations(t)
+	reactorFirst := &FakeReactor{projectionID: 1}
+	reactorSecond := &FakeReactor{projectionID: 2}
 
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	{
-		first1 := reactorFirst.requireCallReact(
-			1, &EventTest{Foo: "foo", Bar: 42}).
-			Once().
-			Return(error(nil))
-
-		second1 := reactorSecond.requireCallReact(
-			1, &EventTest{Foo: "foo", Bar: 42}).
-			Once().
-			Return(error(nil))
-
-		reactorFirst.requireCallReact(
-			2, &EventTest{Foo: "foo2", Bar: 242}).
-			Return(error(nil)).
-			Once().
-			NotBefore(first1).
-			Run(func(mock.Arguments) { wg.Done() })
-
-		reactorSecond.requireCallReact(
-			2, &EventTest{Foo: "foo2", Bar: 242}).
-			Return(error(nil)).
-			Once().
-			NotBefore(second1).
-			Run(func(mock.Arguments) { wg.Done() })
-	}
+	reactorFirst.wg.Add(2)
+	reactorSecond.wg.Add(2)
 
 	addEventsToDB(t, db, ec,
 		&EventTest{Foo: "foo", Bar: 42},
@@ -655,14 +659,31 @@ func TestReactorsPolling(t *testing.T) {
 
 	poll := make(chan time.Time, 1)
 	go func() {
-		err := orch.Listen(ctx, log, &MockPoller{Ch: poll}, 1024)
+		err := orch.Listen(
+			context.Background(), ctx, log, &MockPoller{Ch: poll}, 1024, func() {},
+		)
 		if !errors.Is(err, context.Canceled) {
 			panic(fmt.Errorf("expected context canceled err, received: %w", err))
 		}
 	}()
 	poll <- time.Now() // Trigger polling.
 
-	wg.Wait()
+	requireVersion(t, 2, orch)
+
+	reactorFirst.wg.Wait()
+	reactorSecond.wg.Wait()
+
+	require.Len(t, reactorFirst.reactedTo, 2)
+	require.Equal(t, int64(1), reactorFirst.reactedTo[0].Version)
+	require.Equal(t, int64(2), reactorFirst.reactedTo[1].Version)
+	require.Equal(t, "foo", reactorFirst.reactedTo[0].Event.Foo)
+	require.Equal(t, "foo2", reactorFirst.reactedTo[1].Event.Foo)
+
+	require.Len(t, reactorSecond.reactedTo, 2)
+	require.Equal(t, int64(1), reactorSecond.reactedTo[0].Version)
+	require.Equal(t, int64(2), reactorSecond.reactedTo[1].Version)
+	require.Equal(t, "foo", reactorSecond.reactedTo[0].Event.Foo)
+	require.Equal(t, "foo2", reactorSecond.reactedTo[1].Event.Foo)
 }
 
 func TestEventIterator(t *testing.T) {
@@ -1056,7 +1077,9 @@ func TestAppendCluster(t *testing.T) {
 
 	poll := make(chan time.Time, 1)
 	go func() {
-		err := oA.Listen(ctx, log, &MockPoller{Ch: poll}, 1024)
+		err := oA.Listen(
+			context.Background(), ctx, log, &MockPoller{Ch: poll}, 1024, func() {},
+		)
 		if !errors.Is(err, context.Canceled) {
 			panic(fmt.Errorf("expected context canceled err, received: %w", err))
 		}
