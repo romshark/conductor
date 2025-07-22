@@ -24,7 +24,7 @@ database with rather low write-throughput but strong consistentcy requirements,
 email notifications and an audit log. Event sourcing felt like a natural fit.
 Yet, I didn't want to introduce a complex and heavy [Kafka](https://kafka.apache.org/)
 setup, or similar. It would only need to scale to maybe a couple instances at most.
-Simplicity and reliability was my highest priority.
+Simplicity and reliability were my highest priority.
 
 I created this package to abstract away most of the complex moving parts
 when implementing an event sourced architecture in Go and PostgreSQL, but in a way
