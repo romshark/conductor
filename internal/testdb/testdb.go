@@ -12,8 +12,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 
+	"github.com/romshark/conductor/backoff"
 	"github.com/romshark/conductor/db/dbpgx"
-	"github.com/romshark/conductor/internal/backoff"
 )
 
 const (

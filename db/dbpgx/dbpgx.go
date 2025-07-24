@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/romshark/conductor/backoff"
 	"github.com/romshark/conductor/db"
-	"github.com/romshark/conductor/internal/backoff"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"

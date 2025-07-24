@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/romshark/conductor/backoff"
 	"github.com/romshark/conductor/db"
-	"github.com/romshark/conductor/internal/backoff"
 	"golang.org/x/sync/errgroup"
 )
 
