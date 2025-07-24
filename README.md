@@ -93,3 +93,7 @@ To migrate a PostgreSQL database for dbpgx to use, do in the given order:
 3. Run `db/dbpgx/permissions.sql` sets the role permissions.
 
 You may customize roles and permissions, the defaults here are just a recommendation.
+
+## Development
+
+Use `make test` to run the linters, checks, and tests.
