@@ -77,8 +77,40 @@ func MustRegisterEventTypeIn[T Event](codec *EventCodec, name string) {
 	if t.Kind() == reflect.Ptr {
 		t = t.Elem()
 	}
+	mustValidateType[T](t)
+
 	codec.eventTypeByName[name] = t
 	codec.eventTypeNameByType[t] = name
+}
+
+var metaType = reflect.TypeOf(EventMetadata{})
+
+func mustValidateType[T Event](t reflect.Type) {
+	// Check potential EventMetadata JSON-tag collisions.
+	for i := range t.NumField() {
+		f := t.Field(i)
+		if f.Anonymous && (f.Type == metaType || f.Type == reflect.PointerTo(metaType)) {
+			// Skip the embedded metadata type.
+			continue
+		}
+		tag := f.Tag.Get("json")
+		if tag == "" || strings.HasPrefix(tag, "-") {
+			continue
+		}
+		// get the name part before any comma options
+		tagName := strings.Split(tag, ",")[0]
+		switch {
+		case strings.EqualFold(tagName, "TypeName"),
+			strings.EqualFold(tagName, "Time"),
+			strings.EqualFold(tagName, "RevisionVCS"),
+			strings.EqualFold(tagName, "Version"):
+			panic(fmt.Sprintf(
+				"event type %s has field %q with JSON tag %q "+
+					"which collides with EventMetadata",
+				t.Name(), f.Name, tagName,
+			))
+		}
+	}
 }
 
 func (r *EventCodec) createEventObject(name string) Event {
@@ -87,7 +119,7 @@ func (r *EventCodec) createEventObject(name string) Event {
 		return nil
 	}
 	e := reflect.New(t).Interface().(Event)
-	e.metadata().name = name
+	e.metadata().typeName = name
 	return e
 }
 
@@ -110,7 +142,7 @@ func (r *EventCodec) initializeEvent(
 	}
 
 	m := e.metadata()
-	m.t, m.revisionVCS, m.name = tm, r.revisionVCS, typeName
+	m.t, m.revisionVCS, m.typeName = tm, r.revisionVCS, typeName
 
 	return nil
 }
@@ -127,8 +159,8 @@ type Event interface {
 	// Version returns the unique version of the event.
 	Version() int64
 
-	// Name returns the event type name.
-	Name() string
+	// TypeName returns the event type name.
+	TypeName() string
 
 	// Time returns the event production time.
 	Time() time.Time
@@ -174,7 +206,7 @@ func (r *EventCodec) DecodeJSON(name string, payload []byte) (Event, error) {
 // By default, events are registered globally.
 // It's advised to register the type during package init.
 type EventMetadata struct {
-	name        string
+	typeName    string
 	t           time.Time
 	revisionVCS string
 	version     int64
@@ -185,5 +217,5 @@ func (e *EventMetadata) noimpl() noimpl           { return noimpl{} }
 
 func (e *EventMetadata) Version() int64      { return e.version }
 func (e *EventMetadata) Time() time.Time     { return e.t }
-func (e *EventMetadata) Name() string        { return e.name }
+func (e *EventMetadata) TypeName() string    { return e.typeName }
 func (e *EventMetadata) RevisionVCS() string { return e.revisionVCS }

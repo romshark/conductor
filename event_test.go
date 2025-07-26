@@ -1,6 +1,7 @@
 package conductor
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -37,7 +38,7 @@ func TestJSONCodec(t *testing.T) {
 		Foo: "foo-value",
 		Bar: 42,
 	}
-	newEvent.name = "test-event"
+	newEvent.typeName = "test-event"
 
 	s, err := ec.EncodeJSON(newEvent)
 	require.NoError(t, err)
@@ -50,7 +51,7 @@ func TestJSONCodec(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Equal(t, newEvent, unmarshaled)
-	require.Equal(t, "test-event", unmarshaled.Name())
+	require.Equal(t, "test-event", unmarshaled.TypeName())
 }
 
 func TestNew(t *testing.T) {
@@ -101,6 +102,57 @@ func TestErrJSONUnmarshalMalformedEnvelopePayload(t *testing.T) {
 	require.ErrorContains(t, err,
 		"json: cannot unmarshal array into Go value of type conductor.EventTest")
 	require.Nil(t, unmarshaled)
+}
+
+func requiresTypeRegisterPanics[T Event](
+	t *testing.T, eventTypeName, fieldName, jsonTag string,
+) {
+	t.Helper()
+	expected := fmt.Sprintf(
+		`event type %s has field %q with JSON tag %q which collides with EventMetadata`,
+		eventTypeName, fieldName, jsonTag,
+	)
+	ec := NewTypeCodec("test-revision")
+	require.PanicsWithValue(t, expected, func() {
+		MustRegisterEventTypeIn[T](ec, "test-event")
+	})
+}
+
+// TestPanicFieldNameConflict ensures MustRegisterEventTypeIn panics when the event type
+// has a json fields that conflicts with type EventMetadata to make sure types that
+// can't be unmarshaled later can't be registered in the first place.
+func TestPanicFieldNameConflict(t *testing.T) {
+	t.Parallel()
+
+	type TName struct {
+		EventMetadata
+		TPName string `json:"typeName"`
+	}
+	requiresTypeRegisterPanics[*TName](t, "TName", "TPName", "typeName")
+
+	type TRevisionVCS struct {
+		EventMetadata
+		RevVCS string `json:"revisionVCS"`
+	}
+	requiresTypeRegisterPanics[*TRevisionVCS](t, "TRevisionVCS", "RevVCS", "revisionVCS")
+
+	type TTime struct {
+		EventMetadata
+		TM time.Time `json:"time"`
+	}
+	requiresTypeRegisterPanics[*TTime](t, "TTime", "TM", "time")
+
+	type TVersion struct {
+		EventMetadata
+		V string `json:"version"`
+	}
+	requiresTypeRegisterPanics[*TVersion](t, "TVersion", "V", "version")
+
+	type TVersionCap struct {
+		EventMetadata
+		V string `json:"VERSION"`
+	}
+	requiresTypeRegisterPanics[*TVersionCap](t, "TVersionCap", "V", "VERSION")
 }
 
 func TestPanicInUse(t *testing.T) {

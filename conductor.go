@@ -604,11 +604,11 @@ func (o *Conductor) appendEvent(
 	switch {
 	case m.t.IsZero():
 		panic(fmt.Errorf("event has zero time: %#v", e))
-	case m.name == "":
+	case m.typeName == "":
 		panic(fmt.Sprintf("event has no type name: %#v", e))
 	}
 	newVersion, err = tx.AppendEvent(ctx, assumedVersion, db.Event{
-		TypeName:    m.name,
+		TypeName:    m.typeName,
 		Payload:     jsonPayload,
 		Time:        m.t,
 		RevisionVCS: o.eventCodec.revisionVCS,

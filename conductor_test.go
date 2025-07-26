@@ -858,7 +858,7 @@ func requireEventsInSeq(
 		require.Equal(t, exp.E.Bar, act.E.Bar,
 			"event value mismatch at index %d", i)
 		require.NotZero(t, act.E.Time())
-		require.Equal(t, "event-test", act.E.Name())
+		require.Equal(t, "event-test", act.E.TypeName())
 		require.Equal(t, "test-revision", act.E.RevisionVCS())
 	}
 }
