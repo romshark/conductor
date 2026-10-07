@@ -1,9 +1,6 @@
 <a href="https://pkg.go.dev/github.com/romshark/conductor">
     <img src="https://godoc.org/github.com/romshark/conductor?status.svg" alt="GoDoc">
 </a>
-<a href="https://goreportcard.com/report/github.com/romshark/conductor">
-    <img src="https://goreportcard.com/badge/github.com/romshark/conductor" alt="GoReportCard">
-</a>
 <a href='https://coveralls.io/github/romshark/conductor?branch=main'>
     <img src='https://coveralls.io/repos/github/romshark/conductor/badge.svg?branch=main&service=github' alt='Coverage Status' />
 </a>
