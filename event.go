@@ -74,7 +74,7 @@ func MustRegisterEventTypeIn[T Event](codec *EventCodec, name string) {
 
 	var zero T
 	t := reflect.TypeOf(zero)
-	if t.Kind() == reflect.Ptr {
+	if t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	mustValidateType[T](t)
@@ -83,12 +83,12 @@ func MustRegisterEventTypeIn[T Event](codec *EventCodec, name string) {
 	codec.eventTypeNameByType[t] = name
 }
 
-var metaType = reflect.TypeOf(EventMetadata{})
+var metaType = reflect.TypeFor[EventMetadata]()
 
 func mustValidateType[T Event](t reflect.Type) {
 	// Check potential EventMetadata JSON-tag collisions.
-	for i := range t.NumField() {
-		f := t.Field(i)
+	for f := range t.Fields() {
+		f := f
 		if f.Anonymous && (f.Type == metaType || f.Type == reflect.PointerTo(metaType)) {
 			// Skip the embedded metadata type.
 			continue
@@ -98,7 +98,7 @@ func mustValidateType[T Event](t reflect.Type) {
 			continue
 		}
 		// get the name part before any comma options
-		tagName := strings.Split(tag, ",")[0]
+		tagName, _, _ := strings.Cut(tag, ",")
 		switch {
 		case strings.EqualFold(tagName, "TypeName"),
 			strings.EqualFold(tagName, "Time"),
@@ -127,7 +127,7 @@ func (r *EventCodec) initializeEvent(
 	e Event, now func() time.Time,
 ) error {
 	evType := reflect.TypeOf(e)
-	if evType.Kind() == reflect.Ptr {
+	if evType.Kind() == reflect.Pointer {
 		evType = evType.Elem()
 	}
 	typeName := r.eventTypeNameByType[evType]
