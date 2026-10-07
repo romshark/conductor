@@ -84,7 +84,7 @@ on most transactional databases.
 
 `dbpgx` satisfies the database interfaces using the SQL driver
 [github.com/jackc/pgx/v5](https://pkg.go.dev/github.com/jackc/pgx/v5) and is tested with
-PostgreSQL 17.
+PostgreSQL 18.
 
 To migrate a PostgreSQL database for dbpgx to use, do in the given order:
 
